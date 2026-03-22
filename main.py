@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -93,7 +94,7 @@ def _use_pg() -> bool:
 
 
 def init_db() -> None:
-    """Создаёт таблицу при первом запуске (идемпотентно)."""
+    """Создаёт таблицы при первом запуске (идемпотентно)."""
     if _use_pg():
         conn = _pg()
         cur = conn.cursor()
@@ -104,10 +105,19 @@ def init_db() -> None:
                 added_at TIMESTAMP DEFAULT NOW()
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bot_users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                started_at TIMESTAMP DEFAULT NOW(),
+                last_seen TIMESTAMP DEFAULT NOW()
+            )
+        """)
         conn.commit()
         cur.close()
         conn.close()
-        logger.info("БД: PostgreSQL — таблица allowed_users готова")
+        logger.info("БД: PostgreSQL — таблицы готовы")
     else:
         conn = _sqlite()
         conn.execute("""
@@ -117,9 +127,78 @@ def init_db() -> None:
                 added_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                started_at TEXT DEFAULT (datetime('now')),
+                last_seen TEXT DEFAULT (datetime('now'))
+            )
+        """)
         conn.commit()
         conn.close()
         logger.info(f"БД: SQLite — {SQLITE_PATH}")
+
+
+def db_register_bot_user(user_id: int, username: str, first_name: str) -> None:
+    """Регистрирует пользователя при /start (обновляет last_seen если уже есть)."""
+    if _use_pg():
+        conn = _pg()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO bot_users (user_id, username, first_name) VALUES (%s, %s, %s) "
+            "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, "
+            "first_name = EXCLUDED.first_name, last_seen = NOW()",
+            (user_id, username, first_name),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    else:
+        conn = _sqlite()
+        conn.execute(
+            "INSERT INTO bot_users (user_id, username, first_name) VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, "
+            "first_name = excluded.first_name, last_seen = datetime('now')",
+            (user_id, username, first_name),
+        )
+        conn.commit()
+        conn.close()
+
+
+def db_get_user_count() -> int:
+    """Возвращает общее количество пользователей бота."""
+    if _use_pg():
+        conn = _pg()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM bot_users")
+        count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        return count
+    else:
+        conn = _sqlite()
+        count = conn.execute("SELECT COUNT(*) FROM bot_users").fetchone()[0]
+        conn.close()
+        return count
+
+
+def db_get_all_user_ids() -> list[int]:
+    """Возвращает список всех user_id для рассылки."""
+    if _use_pg():
+        conn = _pg()
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM bot_users")
+        ids = [row[0] for row in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return ids
+    else:
+        conn = _sqlite()
+        ids = [row[0] for row in conn.execute("SELECT user_id FROM bot_users").fetchall()]
+        conn.close()
+        return ids
 
 
 def db_add_user(user_id: int, username: str) -> None:
@@ -306,6 +385,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await access_denied(update)
         return ConversationHandler.END
 
+    db_register_bot_user(user.id, user.username or "", user.first_name or "")
     kill_vanitygen(context)
     await update.message.reply_text(
         "👋 Привет! Я помогу найти красивый адрес кошелька с нужным префиксом.\n\n"
@@ -808,16 +888,169 @@ async def cmd_listusers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+def admin_panel_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Статистика", callback_data="adm:stats")],
+        [InlineKeyboardButton("📢 Рассылка", callback_data="adm:broadcast")],
+        [InlineKeyboardButton("👥 Список доступа", callback_data="adm:listusers")],
+    ])
+
+
+def admin_confirm_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Отправить всем", callback_data="adm:confirm"),
+            InlineKeyboardButton("❌ Отмена", callback_data="adm:cancel"),
+        ]
+    ])
+
+
+def admin_back_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("◀️ Назад", callback_data="adm:menu")]
+    ])
+
+
 @admin_only
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("admin_state", None)
+    context.user_data.pop("broadcast_text", None)
     await update.message.reply_text(
-        "🔧 <b>Команды администратора:</b>\n\n"
-        "/adduser <code>&lt;id&gt; [имя]</code> — выдать доступ\n"
-        "/removeuser <code>&lt;id&gt;</code> — отозвать доступ\n"
-        "/listusers — список всех пользователей\n\n"
+        f"🔧 <b>Панель администратора</b>\n\n"
         f"👤 Твой ID: <code>{ADMIN_ID}</code>",
         parse_mode="HTML",
+        reply_markup=admin_panel_keyboard(),
     )
+
+
+@admin_only
+async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    action = query.data.split(":")[1]
+
+    if action == "menu":
+        context.user_data.pop("admin_state", None)
+        context.user_data.pop("broadcast_text", None)
+        await query.edit_message_text(
+            f"🔧 <b>Панель администратора</b>\n\n"
+            f"👤 Твой ID: <code>{ADMIN_ID}</code>",
+            parse_mode="HTML",
+            reply_markup=admin_panel_keyboard(),
+        )
+
+    elif action == "stats":
+        total = db_get_user_count()
+        await query.edit_message_text(
+            f"📊 <b>Статистика бота</b>\n\n"
+            f"👥 Всего пользователей: <b>{total}</b>\n"
+            f"(все кто нажал /start хотя бы раз)",
+            parse_mode="HTML",
+            reply_markup=admin_back_keyboard(),
+        )
+
+    elif action == "listusers":
+        users = db_list_users()
+        if not users:
+            text = "📋 Список доступа пуст."
+        else:
+            lines = [f"👥 <b>Список доступа ({len(users)}):</b>\n"]
+            for uid, name in users:
+                lines.append(f"• <b>{name}</b> — <code>{uid}</code>")
+            text = "\n".join(lines)
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=admin_back_keyboard())
+
+    elif action == "broadcast":
+        context.user_data["admin_state"] = "waiting_broadcast"
+        await query.edit_message_text(
+            "📢 <b>Рассылка</b>\n\n"
+            "Отправь текст сообщения, который хочешь разослать всем пользователям.\n\n"
+            "<i>Поддерживается HTML-форматирование: &lt;b&gt;жирный&lt;/b&gt;, "
+            "&lt;i&gt;курсив&lt;/i&gt;, &lt;code&gt;код&lt;/code&gt;</i>",
+            parse_mode="HTML",
+            reply_markup=admin_back_keyboard(),
+        )
+
+    elif action == "confirm":
+        text = context.user_data.get("broadcast_text")
+        if not text:
+            await query.edit_message_text("❌ Текст рассылки не найден. Начни заново.",
+                                          reply_markup=admin_back_keyboard())
+            return
+
+        user_ids = db_get_all_user_ids()
+        total = len(user_ids)
+        sent = 0
+        failed = 0
+
+        status_msg = await query.edit_message_text(
+            f"📤 Отправляю рассылку...\n0 / {total}",
+        )
+
+        for uid in user_ids:
+            try:
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=f"📢 <b>Сообщение от администратора:</b>\n\n{text}",
+                    parse_mode="HTML",
+                )
+                sent += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(0.05)
+
+            if (sent + failed) % 20 == 0:
+                try:
+                    await status_msg.edit_text(
+                        f"📤 Отправляю рассылку...\n{sent + failed} / {total}"
+                    )
+                except Exception:
+                    pass
+
+        context.user_data.pop("admin_state", None)
+        context.user_data.pop("broadcast_text", None)
+
+        await status_msg.edit_text(
+            f"✅ <b>Рассылка завершена</b>\n\n"
+            f"📨 Отправлено: <b>{sent}</b>\n"
+            f"❌ Не доставлено: <b>{failed}</b>\n"
+            f"👥 Всего: <b>{total}</b>",
+            parse_mode="HTML",
+            reply_markup=admin_back_keyboard(),
+        )
+
+    elif action == "cancel":
+        context.user_data.pop("admin_state", None)
+        context.user_data.pop("broadcast_text", None)
+        await query.edit_message_text(
+            f"🔧 <b>Панель администратора</b>\n\n"
+            f"👤 Твой ID: <code>{ADMIN_ID}</code>",
+            parse_mode="HTML",
+            reply_markup=admin_panel_keyboard(),
+        )
+
+
+async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Перехватывает текст от администратора когда ожидается текст рассылки."""
+    if context.user_data.get("admin_state") != "waiting_broadcast":
+        return
+
+    text = update.message.text
+    context.user_data["broadcast_text"] = text
+    context.user_data["admin_state"] = "confirm_broadcast"
+
+    total = db_get_user_count()
+    preview = text[:300] + ("..." if len(text) > 300 else "")
+
+    await update.message.reply_text(
+        f"📢 <b>Превью рассылки</b>\n\n"
+        f"<blockquote>{preview}</blockquote>\n\n"
+        f"👥 Получателей: <b>{total}</b>\n\n"
+        "Подтвердить отправку?",
+        parse_mode="HTML",
+        reply_markup=admin_confirm_keyboard(),
+    )
+    raise ApplicationHandlerStop
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -872,11 +1105,22 @@ def main() -> None:
         allow_reentry=True,
     )
 
-    application.add_handler(CommandHandler("admin", cmd_admin))
-    application.add_handler(CommandHandler("adduser", cmd_adduser))
-    application.add_handler(CommandHandler("removeuser", cmd_removeuser))
-    application.add_handler(CommandHandler("listusers", cmd_listusers))
-    application.add_handler(conv_handler)
+    application.add_handler(CommandHandler("admin", cmd_admin), group=0)
+    application.add_handler(CommandHandler("adduser", cmd_adduser), group=0)
+    application.add_handler(CommandHandler("removeuser", cmd_removeuser), group=0)
+    application.add_handler(CommandHandler("listusers", cmd_listusers), group=0)
+    application.add_handler(
+        CallbackQueryHandler(handle_admin_callback, pattern="^adm:"),
+        group=0,
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
+            handle_admin_message,
+        ),
+        group=0,
+    )
+    application.add_handler(conv_handler, group=1)
     application.add_error_handler(error_handler)
 
     logger.info(f"Бот запускается... Администратор: {ADMIN_ID}")
