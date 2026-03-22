@@ -81,7 +81,8 @@ RE_PROGRESS = re.compile(
 def _pg():
     """Открывает соединение с PostgreSQL (только если DATABASE_URL задан)."""
     import psycopg2
-    return psycopg2.connect(DATABASE_URL)
+    url = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    return psycopg2.connect(url, sslmode="require")
 
 
 def _sqlite():
