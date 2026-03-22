@@ -203,9 +203,7 @@ def db_is_allowed(user_id: int) -> bool:
 
 
 def is_allowed(user_id: int) -> bool:
-    if user_id == ADMIN_ID:
-        return True
-    return db_is_allowed(user_id)
+    return True
 
 
 # ─── Клавиатуры ─────────────────────────────────────────────────────────────
