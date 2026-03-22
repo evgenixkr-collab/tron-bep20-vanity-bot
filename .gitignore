@@ -1,0 +1,28 @@
+# Python
+  __pycache__/
+  *.py[cod]
+  *.pyo
+  *.pyd
+  .Python
+  *.egg
+  *.egg-info/
+  .env
+  venv/
+  .venv/
+  env/
+
+  # Скомпилированные бинарники (собирать локально через make)
+  ethvanitygen
+  vanitygen-plusplus/vanitygen++
+  vanitygen-plusplus/*.o
+  vanitygen-plusplus/keyconv
+  vanitygen-plusplus/oclvanitygen++
+  vanitygen-plusplus/oclvanityminer
+
+  # Личные данные
+  allowed_users.json
+
+  # OS
+  .DS_Store
+  Thumbs.db
+  
