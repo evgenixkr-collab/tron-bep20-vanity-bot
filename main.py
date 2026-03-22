@@ -3,13 +3,16 @@ Telegram-бот для генерации ванити TRON (TRC-20) и BEP-20/E
 - TRX: vanitygen++ (~1.5M addr/s), base58 префикс
 - BEP-20: ethvanitygen (OpenSSL secp256k1 + Keccak-256), hex префикс
 Поддерживает систему доступа: только авторизованные пользователи.
+Хранение пользователей:
+  - SQLite (по умолчанию): файл users.db в DATA_DIR или рядом с main.py
+  - PostgreSQL: если задана переменная окружения DATABASE_URL (Railway Postgres)
 """
 
 import asyncio
-import json
 import logging
 import os
 import re
+import sqlite3
 import time
 from pathlib import Path
 from dotenv import load_dotenv
@@ -39,7 +42,14 @@ MAIN_MENU, WAITING_CHAIN, WAITING_PREFIX, SEARCHING = range(4)
 ADMIN_ID = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
 
 SCRIPT_DIR = Path(__file__).parent
-ALLOWED_USERS_FILE = SCRIPT_DIR / "allowed_users.json"
+
+# Путь к SQLite: DATA_DIR (Railway Volume) → рядом с main.py
+DATA_DIR = Path(os.environ.get("DATA_DIR", str(SCRIPT_DIR)))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+SQLITE_PATH = DATA_DIR / "users.db"
+
+# PostgreSQL: если задан DATABASE_URL (Railway Postgres addon)
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 # vanitygen++ для TRX
 VANITYGEN_DIR = SCRIPT_DIR / "vanitygen-plusplus"
@@ -64,31 +74,138 @@ RE_PROGRESS = re.compile(
 )
 
 
-# ─── Работа с пользователями ────────────────────────────────────────────────
+# ─── База данных пользователей ───────────────────────────────────────────────
+# Поддерживает SQLite (по умолчанию) и PostgreSQL (DATABASE_URL)
 
-def load_allowed_users() -> dict:
-    if not ALLOWED_USERS_FILE.exists():
-        return {}
-    try:
-        with open(ALLOWED_USERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error(f"Ошибка чтения allowed_users.json: {e}")
-        return {}
+def _pg():
+    """Открывает соединение с PostgreSQL (только если DATABASE_URL задан)."""
+    import psycopg2
+    return psycopg2.connect(DATABASE_URL)
 
 
-def save_allowed_users(users: dict) -> None:
-    try:
-        with open(ALLOWED_USERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(users, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Ошибка записи allowed_users.json: {e}")
+def _sqlite():
+    """Открывает соединение с SQLite."""
+    return sqlite3.connect(str(SQLITE_PATH))
+
+
+def _use_pg() -> bool:
+    return bool(DATABASE_URL)
+
+
+def init_db() -> None:
+    """Создаёт таблицу при первом запуске (идемпотентно)."""
+    if _use_pg():
+        conn = _pg()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS allowed_users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                added_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("БД: PostgreSQL — таблица allowed_users готова")
+    else:
+        conn = _sqlite()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS allowed_users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                added_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        conn.commit()
+        conn.close()
+        logger.info(f"БД: SQLite — {SQLITE_PATH}")
+
+
+def db_add_user(user_id: int, username: str) -> None:
+    if _use_pg():
+        conn = _pg()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO allowed_users (user_id, username) VALUES (%s, %s) "
+            "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username",
+            (user_id, username),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    else:
+        conn = _sqlite()
+        conn.execute(
+            "INSERT INTO allowed_users (user_id, username) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET username = excluded.username",
+            (user_id, username),
+        )
+        conn.commit()
+        conn.close()
+
+
+def db_remove_user(user_id: int) -> bool:
+    """Возвращает True если пользователь был удалён."""
+    if _use_pg():
+        conn = _pg()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM allowed_users WHERE user_id = %s", (user_id,))
+        deleted = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        conn.close()
+        return deleted
+    else:
+        conn = _sqlite()
+        cur = conn.execute("DELETE FROM allowed_users WHERE user_id = ?", (user_id,))
+        deleted = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+        return deleted
+
+
+def db_list_users() -> list[tuple[int, str]]:
+    """Возвращает список (user_id, username)."""
+    if _use_pg():
+        conn = _pg()
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, username FROM allowed_users ORDER BY added_at")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return rows
+    else:
+        conn = _sqlite()
+        rows = conn.execute(
+            "SELECT user_id, username FROM allowed_users ORDER BY added_at"
+        ).fetchall()
+        conn.close()
+        return rows
+
+
+def db_is_allowed(user_id: int) -> bool:
+    if _use_pg():
+        conn = _pg()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM allowed_users WHERE user_id = %s", (user_id,))
+        found = cur.fetchone() is not None
+        cur.close()
+        conn.close()
+        return found
+    else:
+        conn = _sqlite()
+        found = conn.execute(
+            "SELECT 1 FROM allowed_users WHERE user_id = ?", (user_id,)
+        ).fetchone() is not None
+        conn.close()
+        return found
 
 
 def is_allowed(user_id: int) -> bool:
     if user_id == ADMIN_ID:
         return True
-    return str(user_id) in load_allowed_users()
+    return db_is_allowed(user_id)
 
 
 # ─── Клавиатуры ─────────────────────────────────────────────────────────────
@@ -630,16 +747,14 @@ async def cmd_adduser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     name = " ".join(args[1:]) if len(args) > 1 else f"user_{user_id}"
-    users = load_allowed_users()
-    if str(user_id) in users:
+    if db_is_allowed(user_id):
         await update.message.reply_text(
             f"⚠️ Пользователь <code>{user_id}</code> уже имеет доступ.",
             parse_mode="HTML",
         )
         return
 
-    users[str(user_id)] = {"name": name, "added_at": time.strftime("%Y-%m-%d %H:%M:%S")}
-    save_allowed_users(users)
+    db_add_user(user_id, name)
     await update.message.reply_text(
         f"✅ Доступ выдан: <b>{name}</b> (<code>{user_id}</code>)",
         parse_mode="HTML",
@@ -662,27 +777,24 @@ async def cmd_removeuser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("❌ Telegram ID должен быть числом.")
         return
 
-    users = load_allowed_users()
-    if str(user_id) not in users:
+    deleted = db_remove_user(user_id)
+    if not deleted:
         await update.message.reply_text(
             f"⚠️ Пользователь <code>{user_id}</code> не найден.",
             parse_mode="HTML",
         )
         return
 
-    name = users[str(user_id)].get("name", str(user_id))
-    del users[str(user_id)]
-    save_allowed_users(users)
     await update.message.reply_text(
-        f"🗑 Доступ отозван: <b>{name}</b> (<code>{user_id}</code>)",
+        f"🗑 Доступ отозван: <code>{user_id}</code>",
         parse_mode="HTML",
     )
-    logger.info(f"Доступ отозван у пользователя {user_id} ({name})")
+    logger.info(f"Доступ отозван у пользователя {user_id}")
 
 
 @admin_only
 async def cmd_listusers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    users = load_allowed_users()
+    users = db_list_users()
     if not users:
         await update.message.reply_text(
             "📋 Список пользователей пуст.\n\n"
@@ -692,10 +804,8 @@ async def cmd_listusers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     lines = [f"👥 <b>Пользователи с доступом ({len(users)}):</b>\n"]
-    for uid, info in users.items():
-        name = info.get("name", uid)
-        added = info.get("added_at", "—")
-        lines.append(f"• <b>{name}</b> — <code>{uid}</code>\n  📅 {added}")
+    for uid, name in users:
+        lines.append(f"• <b>{name}</b> — <code>{uid}</code>")
 
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
@@ -726,6 +836,8 @@ def main() -> None:
         raise RuntimeError(f"Бинарник не найден: {VANITYGEN_BIN}")
     if not ETHVANITYGEN_BIN.exists():
         raise RuntimeError(f"Бинарник не найден: {ETHVANITYGEN_BIN}")
+
+    init_db()
 
     application = Application.builder().token(token).build()
 
