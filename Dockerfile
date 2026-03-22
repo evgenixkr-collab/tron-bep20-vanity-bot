@@ -1,14 +1,13 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 # Системные зависимости для компиляции vanitygen++ и ethvanitygen
+# stdbuf входит в coreutils (уже установлен), libpthread-stubs — часть glibc
 RUN apt-get update && apt-get install -y \
     gcc \
     make \
     git \
     libssl-dev \
     libpcre3-dev \
-    libpthread-stubs0-dev \
-    stdbuf \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
