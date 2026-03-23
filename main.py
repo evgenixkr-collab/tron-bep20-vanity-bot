@@ -291,8 +291,9 @@ def is_allowed(user_id: int) -> bool:
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔍 Найти красивый адрес", callback_data="find_address")],
+        [InlineKeyboardButton("❓ Что такое красивый адрес?", callback_data="what_is_vanity")],
+        [InlineKeyboardButton("⚡ Время поиска", callback_data="speed_info")],
         [InlineKeyboardButton("ℹ️ Как это работает?", callback_data="how_it_works")],
-        [InlineKeyboardButton("⚡ Скорость поиска", callback_data="speed_info")],
     ])
 
 
@@ -389,9 +390,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     db_register_bot_user(user.id, user.username or "", user.first_name or "")
     kill_vanitygen(context)
     await update.message.reply_text(
-        "👋 Привет! Я помогу найти красивый адрес кошелька с нужным префиксом.\n\n"
-        "Поддерживаю TRON (TRC-20) и BNB Chain (BEP-20).\n\n"
-        "Выбери действие:",
+        f"👋 Привет, {user.first_name}!\n\n"
+        "Я генерирую <b>персональные крипто-адреса</b> — такие, которые начинаются "
+        "с нужных тебе букв или цифр.\n\n"
+        "Например, вместо случайного адреса вроде\n"
+        "<code>TK7mX3nFqWe9pBcR...</code>\n"
+        "получишь красивый:\n"
+        "<code>TPAXA9mFqWe3pBcR...</code>\n\n"
+        "Поддерживаю <b>TRON (TRC-20)</b> и <b>BNB Chain (BEP-20)</b>.\n\n"
+        "Выбери действие 👇",
+        parse_mode="HTML",
         reply_markup=main_menu_keyboard(),
     )
     return MAIN_MENU
@@ -405,8 +413,39 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     kill_vanitygen(context)
     await query.edit_message_text(
-        "👋 Главное меню. Выбери действие:",
+        "🏠 <b>Главное меню</b>\n\nВыбери действие 👇",
+        parse_mode="HTML",
         reply_markup=main_menu_keyboard(),
+    )
+    return MAIN_MENU
+
+
+async def what_is_vanity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not is_allowed(query.from_user.id):
+        await access_denied(update)
+        return ConversationHandler.END
+    await query.answer()
+    await query.edit_message_text(
+        "❓ <b>Что такое красивый (ванити) адрес?</b>\n\n"
+        "Обычный крипто-кошелёк выглядит так:\n"
+        "<code>TK7mX3nFqWe9pBcRdJ2uYsL...</code>\n"
+        "— полностью случайный набор символов.\n\n"
+        "Красивый адрес — это кошелёк, у которого <b>начало выбрано тобой</b>:\n"
+        "<code>TIVAN...</code> или <code>TBOSS...</code> или <code>TMAMA...</code>\n\n"
+        "💡 <b>Зачем это нужно?</b>\n"
+        "• Легко запомнить и узнать свой адрес\n"
+        "• Выглядит солидно при публичных транзакциях\n"
+        "• Подчёркивает статус — как красивый номер на машине\n"
+        "• Удобно для брендов, блогеров, бизнеса\n\n"
+        "🔐 <b>Это безопасно?</b>\n"
+        "Да. Бот перебирает миллионы случайных ключей до тех пор, "
+        "пока адрес не начнётся с нужных символов. "
+        "Найденный ключ отдаётся только тебе — нигде не сохраняется.\n\n"
+        "⚠️ Приватный ключ — это пароль от кошелька. "
+        "Сохрани его сразу и никому не передавай.",
+        parse_mode="HTML",
+        reply_markup=back_to_main_keyboard(),
     )
     return MAIN_MENU
 
@@ -419,11 +458,20 @@ async def how_it_works(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await query.answer()
     await query.edit_message_text(
         "ℹ️ <b>Как это работает?</b>\n\n"
-        "🔴 <b>TRON (TRC-20)</b>: адреса начинаются с <b>T</b>, затем случайные "
-        "символы в base58. Бот перебирает <b>~1.5 млн адресов/сек</b>.\n\n"
-        "🟡 <b>BEP-20 (BSC)</b>: адреса начинаются с <b>0x</b>, далее "
-        "40 HEX-символов. Бот перебирает <b>~3–5 тыс. адресов/сек</b>.\n\n"
-        "Всё происходит локально — ключи нигде не сохраняются.",
+        "Бот запускает мощный генератор, который создаёт миллионы "
+        "случайных кошельков в секунду и проверяет каждый — "
+        "не начинается ли адрес с нужных тебе символов.\n\n"
+        "🔴 <b>TRON (TRC-20)</b>\n"
+        "Адрес всегда начинается с <b>T</b>. Ты задаёшь следующие символы.\n"
+        "Скорость: <b>~1.5–4 млн адресов/сек</b>\n"
+        "Пример: ввёл <code>IVAN</code> → получил <code>TIVAN8xWq...</code>\n\n"
+        "🟡 <b>BNB Chain (BEP-20)</b>\n"
+        "Адрес начинается с <b>0x</b>. Ты задаёшь HEX-символы (0–9, a–f).\n"
+        "Скорость: <b>~3–5 тыс. адресов/сек</b>\n"
+        "Пример: ввёл <code>DEAD</code> → получил <code>0xDEAD4f7a...</code>\n\n"
+        "🔒 <b>Безопасность</b>\n"
+        "Генерация идёт на сервере в оперативной памяти. "
+        "Приватный ключ отправляется только тебе и нигде не сохраняется.",
         parse_mode="HTML",
         reply_markup=back_to_main_keyboard(),
     )
@@ -437,17 +485,22 @@ async def speed_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     await query.answer()
     await query.edit_message_text(
-        "⚡ <b>Примерное время поиска:</b>\n\n"
-        "🔴 <b>TRON (TRC-20)</b> — ~1.5 млн/сек:\n"
-        "• 3 символа — секунды\n"
-        "• 4 символа — 5–15 минут\n"
-        "• 5 символов — часы\n"
-        "• 6+ символов — дни\n\n"
-        "🟡 <b>BEP-20 (BSC)</b> — ~3–5 тыс/сек:\n"
-        "• 2 символа — секунды\n"
-        "• 3 символа — ~1–2 минуты\n"
-        "• 4 символа — ~15–30 минут\n"
-        "• 5+ символов — часы/дни",
+        "⚡ <b>Примерное время поиска</b>\n\n"
+        "Чем длиннее префикс — тем дольше поиск. "
+        "Каждый новый символ увеличивает время примерно в 58 раз (для TRX) "
+        "или в 16 раз (для BEP-20).\n\n"
+        "🔴 <b>TRON (TRC-20)</b> — ~1.5–4 млн/сек:\n"
+        "• 3 символа → <b>секунды</b>\n"
+        "• 4 символа → <b>5–20 минут</b>\n"
+        "• 5 символов → <b>несколько часов</b>\n"
+        "• 6 символов → <b>дни</b>\n\n"
+        "🟡 <b>BNB Chain (BEP-20)</b> — ~3–5 тыс/сек:\n"
+        "• 2 символа → <b>секунды</b>\n"
+        "• 3 символа → <b>1–3 минуты</b>\n"
+        "• 4 символа → <b>15–40 минут</b>\n"
+        "• 5+ символов → <b>часы и дни</b>\n\n"
+        "💡 <b>Совет:</b> для первого раза попробуй 3–4 символа — "
+        "результат придёт быстро и ты поймёшь как всё работает.",
         parse_mode="HTML",
         reply_markup=back_to_main_keyboard(),
     )
@@ -1078,6 +1131,7 @@ def main() -> None:
         states={
             MAIN_MENU: [
                 CallbackQueryHandler(find_address, pattern="^find_address$"),
+                CallbackQueryHandler(what_is_vanity, pattern="^what_is_vanity$"),
                 CallbackQueryHandler(how_it_works, pattern="^how_it_works$"),
                 CallbackQueryHandler(speed_info, pattern="^speed_info$"),
                 CallbackQueryHandler(main_menu_callback, pattern="^main_menu$"),
